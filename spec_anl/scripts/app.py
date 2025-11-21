@@ -171,7 +171,6 @@
 
 
 
-
 import numpy as np
 import streamlit as st
 import librosa
@@ -180,6 +179,8 @@ import matplotlib.pyplot as plt
 import io
 import soundfile as sf
 import librosa.feature as lf
+from st_audiorec import st_audiorec
+
 
 def compute_linear_spec(
     y,
@@ -247,12 +248,27 @@ def compute_mel_spec(
 # st.set_page_config(layout="wide")
 st.title("Interactive Spectrogram Explorer")
 
-# ===== Sidebar controls =====
+# ===== Audio source controls =====
 
-uploaded_file = st.file_uploader(
-    "Upload an audio file",
-    type=["wav", "mp3", "flac", "ogg"],
+input_mode = st.radio(
+    "Choose audio source",
+    ["Upload file", "Record from microphone"],
+    horizontal=True,
 )
+
+uploaded_file = None
+recorded_bytes = None
+
+if input_mode == "Upload file":
+    uploaded_file = st.file_uploader(
+        "Upload an audio file",
+        type=["wav", "mp3", "flac", "ogg"],
+    )
+else:
+    st.write("Press the red circle to start or stop recording.")
+    recorded_bytes = st_audiorec()
+
+# ===== Sidebar controls =====
 
 sr_target = st.sidebar.number_input(
     "Target sample rate",
@@ -347,10 +363,29 @@ cmap = st.sidebar.selectbox(
     index=0,
 )
 
+# ===== Prepare audio y, sr =====
+
+audio_available = False
+y = None
+sr = sr_target
+
+if input_mode == "Upload file" and uploaded_file is not None:
+    y, sr = librosa.load(uploaded_file, sr=sr_target, mono=True)
+    audio_available = True
+
+elif input_mode == "Record from microphone" and recorded_bytes is not None:
+    # recorded_bytes is a WAV byte buffer from st_audiorec
+    buf_in = io.BytesIO(recorded_bytes)
+    data, rec_sr = sf.read(buf_in)
+    if data.ndim > 1:
+        data = data.mean(axis=1)  # mono
+    y = librosa.resample(data, orig_sr=int(rec_sr), target_sr=sr_target)
+    sr = sr_target
+    audio_available = True
+
 # ===== Main content =====
 
-if uploaded_file is not None:
-    y, sr = librosa.load(uploaded_file, sr=sr_target, mono=True)
+if audio_available:
     total_duration = len(y) / sr
 
     st.sidebar.markdown("### Time crop in seconds")
@@ -366,22 +401,17 @@ if uploaded_file is not None:
     if end_time <= start_time:
         st.sidebar.error("End time must be greater than start time")
 
-
-    # st.audio(uploaded_file, format="audio/wav")
     # Slice waveform for the selected time range
     start_sample = int(start_time * sr)
     end_sample = int(end_time * sr)
     y_seg = y[start_sample:end_sample]
 
     # Audio player for the cropped region
-    # Streamlit audio expects bytes, so we reencode
-
-
     buf = io.BytesIO()
     sf.write(buf, y_seg, sr, format="WAV")
     st.audio(buf.getvalue(), format="audio/wav")
 
-
+    # Compute spectrogram
     if spec_type == "Mel":
         S = compute_mel_spec(
             y=y_seg,
@@ -409,11 +439,6 @@ if uploaded_file is not None:
             top_db=top_db,
         )
 
-    # fig, ax = plt.subplots(figsize=(9, 4))
-    # Use the cropped audio segment if you added the time slider
-    # otherwise set y_seg = y above
-    y_seg = y_seg if "y_seg" in locals() else y
-
     # Two rows: waveform on top, spectrogram below
     fig, (ax_wave, ax_spec) = plt.subplots(
         2,
@@ -438,7 +463,7 @@ if uploaded_file is not None:
     ax_wave.plot(rms_times, rms_norm, color="orange", alpha=0.8)
     ax_wave.legend(["Waveform", "RMS (norm)"])
 
-
+    # Spectrogram
     if spec_type == "Mel":
         img = librosa.display.specshow(
             S,
@@ -479,6 +504,7 @@ if uploaded_file is not None:
             )
         ax_spec.set_ylabel("Hz")
 
+    # Spectral centroid overlay
     centroid = lf.spectral_centroid(
         y=y_seg,
         sr=sr,
@@ -488,11 +514,11 @@ if uploaded_file is not None:
     cent_times = librosa.frames_to_time(
         np.arange(len(centroid)), sr=sr, hop_length=hop_length
     )
-
     ax_spec.plot(cent_times, centroid, color="white", linewidth=1, alpha=0.7)
 
-    # ax.set_title(f"{spec_type} spectrogram")
-    ax_spec.set_title(f"{spec_type} spectrogram  from {start_time:.2f}s to {end_time:.2f}s")
+    ax_spec.set_title(
+        f"{spec_type} spectrogram  from {start_time:.2f}s to {end_time:.2f}s"
+    )
     ax_spec.set_xlabel("Time in seconds")
 
     cbar = fig.colorbar(
@@ -504,6 +530,7 @@ if uploaded_file is not None:
 
     st.pyplot(fig)
 
+    # Download button for current figure
     img_buf = io.BytesIO()
     fig.savefig(img_buf, format="png", bbox_inches="tight")
     img_buf.seek(0)
@@ -515,4 +542,4 @@ if uploaded_file is not None:
         mime="image/png",
     )
 else:
-    st.info("Upload an audio file to see its spectrogram.")
+    st.info("Upload a file or record audio to see its spectrogram.")
